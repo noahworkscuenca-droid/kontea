@@ -136,10 +136,13 @@
   .ingredient-row input{flex:1;}
   .ingredient-row .rm{background:none;border:none;color:var(--danger);font-size:18px;cursor:pointer;padding:4px 8px;flex-shrink:0;}
   .item-row{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px;margin-bottom:8px;}
+  .item-row.uncertain{border-color:var(--warn);background:color-mix(in srgb, var(--warn) 8%, var(--card));}
   .item-row .top-line{display:flex;gap:8px;margin-bottom:6px;}
   .item-row .top-line input:first-child{flex:2;}
   .item-row .bottom-line{display:flex;gap:8px;align-items:center;}
   .item-row input{background:var(--card-2);border:1px solid var(--line);border-radius:8px;padding:8px;color:var(--ink);font-size:13.5px;width:100%;}
+  .item-row .uncertain-tag{display:flex;align-items:center;gap:5px;font-size:11.5px;font-weight:700;color:var(--warn);margin-bottom:6px;}
+  .item-row .line-total-hint{font-size:11px;color:var(--ink-dim);margin-top:4px;}
   .toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);
     padding:10px 18px;border-radius:30px;font-size:13.5px;font-weight:600;z-index:100;box-shadow:0 6px 20px rgba(0,0,0,0.25);max-width:88%;text-align:center;}
   .toast.err{background:var(--danger);color:#fff;}
@@ -399,6 +402,24 @@ async function refreshProducts(){
   const rid = STATE.me.restaurant_id;
   const {data} = await sb.from('products').select('*').eq('restaurant_id', rid).eq('is_active', true).order('name');
   STATE.products = data || [];
+}
+
+/* Arma un catálogo compacto de insumos conocidos (nombre por proveedor) para ayudar a la IA
+   a reconocer letra manuscrita ambigua contra lo que este negocio ya compra habitualmente.
+   Si supplierId se da, solo incluye los insumos de ese proveedor (más preciso); si no,
+   incluye todo el catálogo activo agrupado por proveedor. Vacío al inicio (negocio nuevo) —
+   no hace falta ningún paso extra del usuario, se construye solo con el uso normal. */
+function buildKnownCatalog(supplierId){
+  if(!STATE.products || !STATE.products.length) return '';
+  const bySupplier = {};
+  const supplierName = (id) => (STATE.suppliers.find(s=>s.id===id)||{}).name || 'Sin proveedor';
+  STATE.products.forEach(p => {
+    if(supplierId && p.preferred_supplier_id !== supplierId) return;
+    const key = p.preferred_supplier_id || '__none';
+    (bySupplier[key] = bySupplier[key] || []).push(p.name);
+  });
+  const lines = Object.keys(bySupplier).map(key => `- ${key==='__none' ? 'Sin proveedor asignado' : supplierName(key)}: ${bySupplier[key].join(', ')}`);
+  return lines.join('\n');
 }
 async function refreshMovements(){
   const {data} = await sb.from('inventory_movements').select('*, products(name, unit_of_measure)').order('created_at',{ascending:false}).limit(30);
@@ -1034,7 +1055,7 @@ async function runScan(file){
     status.innerHTML = `<div class="loading"><div class="spinner"></div>Leyendo factura con IA…</div>`;
     const resp = await fetch(SUPABASE_URL + '/functions/v1/kontea-scan-items', {
       method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({ image_url: signed.signedUrl, jwt: STATE.session.access_token })
+      body: JSON.stringify({ image_url: signed.signedUrl, jwt: STATE.session.access_token, known_catalog: buildKnownCatalog() })
     });
     const result = await resp.json();
     if(!result.ok) throw new Error(result.error === 'unauthorized' ? 'Sesión no válida, vuelve a entrar.' : (result.error || 'No se pudo leer la factura'));
@@ -1045,14 +1066,18 @@ async function runScan(file){
 }
 
 function renderScanReview(data, imageUrl, source){
-  let items = (data.items||[]).map(i => ({name:i.name||'', quantity:i.quantity||1, unit:i.unit||'', unit_price:i.unit_price||''}));
+  let items = (data.items||[]).map(i => ({name:i.name||'', quantity:i.quantity||1, unit:i.unit||'', unit_price:i.unit_price||'', line_total:i.line_total||null, uncertain:!!i.uncertain}));
+  const uncertainCount = items.filter(i=>i.uncertain).length;
   const hintText = source==='xml'
     ? 'Leído directamente del archivo XML — datos exactos, sin IA. Revisa el tipo de pago (no viene en el archivo) y confirma.'
-    : 'La IA leyó esto — corrige lo que haga falta antes de confirmar. Los insumos nuevos se crean solos.';
+    : (uncertainCount
+        ? `La IA leyó esto pero no está segura de ${uncertainCount} línea${uncertainCount>1?'s':''} (marcada${uncertainCount>1?'s':''} en naranja) — revisa esas antes de confirmar, el resto ya lo leyó con confianza.`
+        : 'La IA leyó esto con confianza — de todas formas dale un vistazo antes de confirmar. Los insumos nuevos se crean solos.');
   function renderItems(){
     const box = document.getElementById('scan-items-box');
     box.innerHTML = items.map((it,idx)=>`
-      <div class="item-row">
+      <div class="item-row ${it.uncertain?'uncertain':''}">
+        ${it.uncertain ? `<div class="uncertain-tag">⚠ revisa esta línea — la IA no está segura</div>` : ''}
         <div class="top-line">
           <input data-idx="${idx}" data-f="name" placeholder="Producto" value="${it.name}">
           <input data-idx="${idx}" data-f="quantity" type="number" step="any" placeholder="Cant." value="${it.quantity}" style="max-width:70px;">
@@ -1062,9 +1087,16 @@ function renderScanReview(data, imageUrl, source){
           <input data-idx="${idx}" data-f="unit_price" type="number" step="any" placeholder="₡ unitario" value="${it.unit_price}">
           <button type="button" class="rm" data-rm="${idx}">✕</button>
         </div>
+        ${it.line_total ? `<div class="line-total-hint">La factura mostraba el total de esta línea en ₡${Number(it.line_total).toLocaleString('es-CR')}</div>` : ''}
       </div>`).join('');
     box.querySelectorAll('input').forEach(el => el.oninput = () => {
-      items[el.dataset.idx][el.dataset.f] = el.type==='number' ? Number(el.value) : el.value;
+      const idx = el.dataset.idx;
+      items[idx][el.dataset.f] = el.type==='number' ? Number(el.value) : el.value;
+      if(items[idx].uncertain){
+        items[idx].uncertain = false; // el usuario ya lo revisó/corrigió
+        const row = el.closest('.item-row');
+        if(row){ row.classList.remove('uncertain'); const tag = row.querySelector('.uncertain-tag'); if(tag) tag.remove(); }
+      }
     });
     box.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { items.splice(Number(b.dataset.rm),1); renderItems(); });
   }
@@ -1098,7 +1130,7 @@ function renderScanReview(data, imageUrl, source){
       supplier_name: f.get('supplier_name'), invoice_number: f.get('invoice_number'),
       invoice_date: f.get('invoice_date'), total_amount: Number(f.get('total_amount')),
       sale_type: f.get('sale_type'), image_url: imageUrl,
-      items: items.filter(i=>i.name && i.name.trim())
+      items: items.filter(i=>i.name && i.name.trim()).map(i=>({name:i.name, quantity:i.quantity, unit:i.unit, unit_price:i.unit_price}))
     };
     try{
       const {data: res, error} = await sb.rpc('kontea_save_invoice_with_stock', {
@@ -1146,7 +1178,8 @@ function openCompleteInvoiceModal(inv){
     const box = document.getElementById('complete-items-box');
     if(!box) return;
     box.innerHTML = items.map((it,idx)=>`
-      <div class="item-row">
+      <div class="item-row ${it.uncertain?'uncertain':''}">
+        ${it.uncertain ? `<div class="uncertain-tag">⚠ revisa esta línea — la IA no está segura</div>` : ''}
         <div class="top-line">
           <input data-idx="${idx}" data-f="name" placeholder="Producto" value="${it.name}">
           <input data-idx="${idx}" data-f="quantity" type="number" step="any" placeholder="Cant." value="${it.quantity}" style="max-width:70px;">
@@ -1156,9 +1189,16 @@ function openCompleteInvoiceModal(inv){
           <input data-idx="${idx}" data-f="unit_price" type="number" step="any" placeholder="₡ unitario" value="${it.unit_price}">
           <button type="button" class="rm" data-rm="${idx}">✕</button>
         </div>
+        ${it.line_total ? `<div class="line-total-hint">La factura mostraba el total de esta línea en ₡${Number(it.line_total).toLocaleString('es-CR')}</div>` : ''}
       </div>`).join('');
     box.querySelectorAll('input').forEach(el => el.oninput = () => {
-      items[el.dataset.idx][el.dataset.f] = el.type==='number' ? Number(el.value) : el.value;
+      const idx = el.dataset.idx;
+      items[idx][el.dataset.f] = el.type==='number' ? Number(el.value) : el.value;
+      if(items[idx].uncertain){
+        items[idx].uncertain = false;
+        const row = el.closest('.item-row');
+        if(row){ row.classList.remove('uncertain'); const tag = row.querySelector('.uncertain-tag'); if(tag) tag.remove(); }
+      }
     });
     box.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { items.splice(Number(b.dataset.rm),1); renderItems(); });
   }
@@ -1189,11 +1229,11 @@ function openCompleteInvoiceModal(inv){
         if(signErr) throw signErr;
         const resp = await fetch(SUPABASE_URL + '/functions/v1/kontea-scan-items', {
           method:'POST', headers:{'content-type':'application/json'},
-          body: JSON.stringify({ image_url: signed.signedUrl, jwt: STATE.session.access_token })
+          body: JSON.stringify({ image_url: signed.signedUrl, jwt: STATE.session.access_token, known_catalog: buildKnownCatalog(inv.supplier_id) })
         });
         const result = await resp.json();
         if(!result.ok) throw new Error(result.error === 'unauthorized' ? 'Sesión no válida, vuelve a entrar.' : (result.error || 'No se pudo leer la factura'));
-        items = (result.data.items||[]).map(i => ({name:i.name||'', quantity:i.quantity||1, unit:i.unit||'', unit_price:i.unit_price||''}));
+        items = (result.data.items||[]).map(i => ({name:i.name||'', quantity:i.quantity||1, unit:i.unit||'', unit_price:i.unit_price||'', line_total:i.line_total||null, uncertain:!!i.uncertain}));
         status.innerHTML = '';
         renderItems(); refreshCount();
       }catch(err){
@@ -1219,7 +1259,7 @@ function openCompleteInvoiceModal(inv){
     }
   };
   document.getElementById('complete-save-btn').onclick = async () => {
-    const validItems = items.filter(i=>i.name && i.name.trim());
+    const validItems = items.filter(i=>i.name && i.name.trim()).map(i=>({name:i.name, quantity:i.quantity, unit:i.unit, unit_price:i.unit_price}));
     if(!validItems.length){ toast('Agrega al menos un insumo', true); return; }
     const btn = document.getElementById('complete-save-btn');
     btn.disabled = true; btn.textContent = 'Guardando…';
