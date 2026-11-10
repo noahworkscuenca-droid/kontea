@@ -458,13 +458,13 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
     try { const saved = localStorage.getItem('kontea_theme'); if(saved) document.documentElement.setAttribute('data-theme', saved); } catch (e) {}
   }
   applyTheme();
-  const BASE = { channel: 'whatsapp', phone: '', greeting: 'Hola! Tengo pedido', closing: 'Gracias', aliases: {}, catalog: {}, usuals: [] };
+  const BASE = { channel: 'whatsapp', phone: '', greeting: 'Hola! Tengo pedido', closing: 'Gracias', app: '', aliases: {}, catalog: {}, usuals: [] };
   const DEFAULTS = {
     ISLENA: Object.assign({}, BASE, { name: 'Isleña', aliases: {
       'PASTA DE TOMATE CIRIO': 'Pasta de tomate', 'ACEITE DE OLIVA ORUJO': 'Aceite de oliva', 'ACEITE AJONJOLI': 'Aceite de ajonjolí',
       'SACO HARINA BLANCA': 'Saco de harina blanca', 'VINO TINTO LAVINA': 'Vino tinto Laviña', 'VINO BLANCO LAVINA': 'Vino blanco Laviña',
       'PAPEL HIGIENICO': 'Papel higiénico', 'ZUKRA 2 KG': 'Zukra 2 kg', 'MOSTAZA DIJON': 'Mostaza Dijon' } }),
-    BELCA: Object.assign({}, BASE, { name: 'Belca', channel: 'lista', catalog: {
+    BELCA: Object.assign({}, BASE, { name: 'Belca', channel: 'lista', app: 'Choco', catalog: {
       'GARBANZO SECO': { name: 'Garbanzo Seco Don Pancho Pq 1kg' },
       'CANELA MOLIDA': { name: 'Canela en Polvo Global Spice Ud 1kg' },
       'CANELA EN ROLLO': { name: 'Canela en Rollo Global Spice Ud 250gr' },
@@ -599,8 +599,15 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
   function startOrder(k, col) {
     const sh = S.sheets[k], cfg = supCfg(k);
-    S.sup = k; S.col = col == null ? sh.grid.latestCol : col; S.mode = cfg.channel;
-    S.items = Core.buildOrder(sh.grid, S.col, Object.assign({}, cfg, { channel: S.mode }));
+    S.sup = k; S.mode = cfg.channel;
+    if (sh) {
+      S.col = col == null ? sh.grid.latestCol : col;
+      S.items = Core.buildOrder(sh.grid, S.col, Object.assign({}, cfg, { channel: S.mode }));
+    } else {
+      S.col = null;
+      S.items = Core.buildOrder({ products: [] }, null, cfg);
+      S.items.forEach(i => { i.flags = []; });
+    }
     S.view = 'review'; S.notice = ''; S.error = '';
   }
   function toSend() {
@@ -618,26 +625,33 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
   }
   const errBox = () => S.error ? '<div class="error-box" role="alert">' + esc(S.error) + '</div>' : '';
   const qtyText = it => Core.fmtQty(it.qty) + (it.unit ? ' ' + Core.unitLabel(it.qty, it.unit) : '');
-  const chBadge = c => c.channel === 'lista' ? '<span class="channel-badge portal">Choco</span>' : '<span class="channel-badge whatsapp">WhatsApp</span>';
+  const chBadge = c => c.channel === 'lista' ? '<span class="channel-badge portal">' + esc(c.app || 'Lista') + '</span>' : '<span class="channel-badge whatsapp">WhatsApp</span>';
 
   function vPedidos() {
-    const per = Object.keys(S.sheets).map(k => {
-      const sh = S.sheets[k], cfg = supCfg(k), g = sh.grid;
-      return { k, sh, cfg, g, items: Core.buildOrder(g, g.latestCol, cfg).filter(i => i.include && i.qty > 0) };
+    const per = Object.keys(S.cfg).map(k => {
+      const sh = S.sheets[k], cfg = supCfg(k), g = sh ? sh.grid : null;
+      return { k, sh, cfg, g, items: g ? Core.buildOrder(g, g.latestCol, cfg).filter(i => i.include && i.qty > 0) : [] };
     });
     const total = per.reduce((a, p) => a + p.items.length, 0);
-    const cards = per.map(p => '<div class="supplier-group"><div class="head"><b>' + esc(p.cfg.name) + chBadge(p.cfg) + '</b>' +
+    const noSheet = p => '<div class="supplier-group"><div class="head"><b>' + esc(p.cfg.name) + chBadge(p.cfg) + '</b><span class="badge ok">Sin hoja</span></div>' +
+      '<div class="hint" style="margin-bottom:6px;">' + (p.cfg.usuals.length
+        ? 'Pedido desde su lista de usuales (' + p.cfg.usuals.length + '). Marque lo que necesita.'
+        : 'Aún no tiene productos. Agréguelos al armar el primer pedido o en Ajustes.') + '</div>' +
+      p.cfg.usuals.slice(0, 5).map(u => '<div class="order-row"><span>' + esc(u.name) + '</span><span class="oq">' + esc(qtyText(u)) + '</span></div>').join('') +
+      (p.cfg.usuals.length > 5 ? '<div class="hint" style="margin-top:6px;">y ' + (p.cfg.usuals.length - 5) + ' más</div>' : '') +
+      '<div class="order-actions"><button type="button" class="btn" data-act="order" data-k="' + esc(p.k) + '">Armar pedido</button></div></div>';
+    const cards = per.map(p => !p.g ? noSheet(p) : '<div class="supplier-group"><div class="head"><b>' + esc(p.cfg.name) + chBadge(p.cfg) + '</b>' +
       (p.sh.example ? '<span class="badge low">Ejemplo</span>' : '<span class="badge ok">Hoja cargada</span>') + '</div>' +
       '<div class="hint" style="margin-bottom:6px;">Inventario del ' + esc(dateLabel(p.g, p.g.latestCol)) + ' · ' + p.items.length + ' productos por pedir</div>' +
       p.items.slice(0, 5).map(it => '<div class="order-row"><span>' + esc(it.name) + '</span><span class="oq">' + esc(qtyText(it)) + '</span></div>').join('') +
       (p.items.length > 5 ? '<div class="hint" style="margin-top:6px;">y ' + (p.items.length - 5) + ' más</div>' : '') +
       '<div class="order-actions"><button type="button" class="btn" data-act="order" data-k="' + esc(p.k) + '">Revisar y pedir</button></div></div>').join('');
     return '<div class="total-card"><div class="lbl">Por pedir según el último inventario</div><div class="amt">' + total + ' productos</div>' +
-      '<div class="row">' + per.map(p => '<div class="stat"><b>' + p.items.length + '</b><span>' + esc(p.cfg.name) + '</span></div>').join('') + '</div></div>' +
+      '<div class="row">' + per.filter(p => p.g).map(p => '<div class="stat"><b>' + p.items.length + '</b><span>' + esc(p.cfg.name) + '</span></div>').join('') + '</div></div>' +
       (S.sheetUrl
         ? '<button type="button" class="btn scan" data-act="refresh"' + (S.busy ? ' disabled' : '') + '>' + (S.busy ? 'Leyendo la hoja…' : 'Actualizar desde Google Sheets') + '</button>'
         : '<button type="button" class="btn secondary" data-act="tab" data-t="hoja">Conectar la hoja de Google</button>') +
-      errBox() + '<div class="section-title">Proveedores</div><div id="orders-list">' + cards + '</div>' +
+      errBox() + '<div class="section-title">Proveedores<button type="button" class="btn ghost" data-act="tab" data-t="ajustes">+ Agregar</button></div><div id="orders-list">' + cards + '</div>' +
       '<div class="hint" style="text-align:center;">Nada se envía sin que usted lo revise y confirme.</div>';
   }
   function vHoja() {
@@ -663,14 +677,29 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
         '<div class="field"><label for="cl_' + id + '">Despedida</label><input type="text" id="cl_' + id + '" data-cfg="closing" data-k="' + esc(k) + '" value="' + esc(c.closing) + '"></div>' +
         '<div class="field" style="margin-bottom:0;"><label for="chn_' + id + '">Forma de pedido</label><select id="chn_' + id + '" data-cfg="channel" data-k="' + esc(k) + '">' +
         '<option value="whatsapp"' + (c.channel === 'whatsapp' ? ' selected' : '') + '>Mensaje de WhatsApp</option>' +
-        '<option value="lista"' + (c.channel === 'lista' ? ' selected' : '') + '>Lista para marcar en la app del proveedor</option></select></div></div>';
+        '<option value="lista"' + (c.channel === 'lista' ? ' selected' : '') + '>Lista para marcar en la app o sitio del proveedor</option></select></div>' +
+        '<div class="field" style="margin-top:12px;"><label for="ap_' + id + '">App o sitio donde se pide (ej. Choco, PriceSmart)</label><input type="text" id="ap_' + id + '" data-cfg="app" data-k="' + esc(k) + '" value="' + esc(c.app) + '" autocomplete="off"></div>' +
+        '<div class="section-title" style="margin:6px 0 6px;">Productos usuales</div>' +
+        '<p class="hint" style="margin:0 0 8px;">Aparecen sin marcar en cada pedido' + (S.sheets[k] ? ', además de lo que diga la hoja.' : '. Este proveedor no tiene hoja: el pedido sale de esta lista.') + '</p>' +
+        (c.usuals.length ? c.usuals.map((u, j) => '<div class="order-row"><span>' + esc(u.name) + '</span><span class="oq">' + esc(qtyText(u)) + '</span>' +
+          '<button type="button" class="btn ghost" data-act="delusual" data-k="' + esc(k) + '" data-j="' + j + '" aria-label="Quitar ' + esc(u.name) + ' de los usuales">Quitar</button></div>').join('') : '<div class="hint">Ninguno todavía.</div>') +
+        '<div class="add-grid" style="margin-top:10px;"><input type="text" id="un_' + id + '" placeholder="Producto" aria-label="Producto usual nuevo de ' + esc(c.name) + '">' +
+        '<input type="number" id="uq_' + id + '" min="1" value="1" aria-label="Cantidad usual"><input type="text" id="uu_' + id + '" placeholder="unidad" aria-label="Unidad"></div>' +
+        '<button type="button" class="btn secondary" data-act="addusual" data-k="' + esc(k) + '" data-id="' + id + '">Agregar a usuales</button>' +
+        (DEFAULTS[k] ? '' : '<button type="button" class="btn secondary" data-act="delsup" data-k="' + esc(k) + '">' + (S.confirmDel === k ? 'Toque otra vez para eliminar a ' + esc(c.name) : 'Eliminar proveedor') + '</button>') + '</div>';
     }).join('');
-    return '<h2 class="view-title">Ajustes</h2>' + errBox() + sups +
+    const nuevo = '<div class="card narrow"><h3>Agregar proveedor</h3>' +
+      '<div class="field"><label for="newname">Nombre</label><input type="text" id="newname" autocomplete="off" placeholder="Ej. PriceSmart"></div>' +
+      '<div class="field"><label for="newch">Forma de pedido</label><select id="newch"><option value="lista">Lista para marcar en la app o sitio del proveedor</option><option value="whatsapp">Mensaje de WhatsApp</option></select></div>' +
+      '<div class="field"><label for="newapp">App o sitio donde se pide (si aplica)</label><input type="text" id="newapp" autocomplete="off" placeholder="Ej. Choco"></div>' +
+      '<button type="button" class="btn" data-act="addsup">Agregar proveedor</button>' +
+      '<p class="hint" style="margin:10px 0 0;">Si después crea en la hoja una pestaña titulada «INVENTARIO» más este mismo nombre, se enlaza sola con este proveedor.</p></div>';
+    return '<h2 class="view-title">Ajustes</h2>' + errBox() + nuevo + sups +
       '<div class="card narrow"><p class="hint" style="margin:0 0 12px;">Los ajustes, el enlace y la última hoja se guardan solo en este dispositivo.</p>' +
       '<button type="button" class="btn secondary" data-act="reset">' + (S.confirmReset ? 'Toque otra vez para borrar todo' : 'Borrar hojas y ajustes guardados') + '</button></div>';
   }
   function vReview() {
-    const sh = S.sheets[S.sup], cfg = supCfg(S.sup), g = sh.grid;
+    const sh = S.sheets[S.sup], cfg = supCfg(S.sup), g = sh ? sh.grid : { dates: [] };
     const opts = g.dates.slice().reverse().map(d => '<option value="' + d.col + '"' + (d.col === S.col ? ' selected' : '') + '>' + esc(d.label) + '</option>').join('');
     const rows = S.items.map((it, i) => {
       const off = !it.include || !(it.qty > 0);
@@ -685,9 +714,10 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
     }).join('');
     const n = included().length;
     return '<button type="button" class="btn ghost back" data-act="tab" data-t="pedidos">‹ Proveedores</button>' +
-      '<div><div class="hint">' + esc(cfg.name) + (sh.example ? ' · datos de ejemplo' : '') + '</div><h2 class="view-title">Revise el pedido</h2></div>' + errBox() +
-      '<div class="field narrow" style="margin-bottom:0;"><label for="datesel">Fecha del inventario</label><select id="datesel" data-ch="date">' + opts + '</select></div>' +
-      '<div id="review-list" class="narrow">' + (rows || '<div class="empty">Esta fecha no tiene nada por pedir.</div>') + '</div>' +
+      '<div><div class="hint">' + esc(cfg.name) + (sh ? (sh.example ? ' · datos de ejemplo' : '') : ' · sin hoja de inventario') + '</div><h2 class="view-title">' + (sh ? 'Revise el pedido' : 'Arme el pedido') + '</h2></div>' + errBox() +
+      (sh ? '<div class="field narrow" style="margin-bottom:0;"><label for="datesel">Fecha del inventario</label><select id="datesel" data-ch="date">' + opts + '</select></div>'
+          : '<p class="hint" style="margin:0;">Marque lo que necesita de su lista de usuales y ajuste las cantidades. Lo que agregue aquí queda guardado en la lista.</p>') +
+      '<div id="review-list" class="narrow">' + (rows || '<div class="empty">' + (sh ? 'Esta fecha no tiene nada por pedir.' : 'Agregue abajo el primer producto.') + '</div>') + '</div>' +
       '<div class="card narrow"><h3>Agregar producto</h3><div class="add-grid">' +
       '<input type="text" id="addname" placeholder="Producto" aria-label="Producto nuevo">' +
       '<input type="number" id="addqty" min="1" value="1" aria-label="Cantidad">' +
@@ -708,12 +738,12 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
       bar = '<a class="btn" id="wa" target="_blank" rel="noopener" href="' + esc(Core.waUrl(cfg.phone, S.msg)) + '">Abrir WhatsApp con el pedido</a>' +
         '<div class="hint">' + (digits ? 'Se abre el chat del +' + esc(digits) + ' con el texto listo. Usted toca enviar.' : 'No hay número guardado para ' + esc(cfg.name) + ': WhatsApp le pedirá elegir el contacto. Guárdelo en Ajustes.') + '</div>';
     } else {
-      body = '<p class="hint" style="margin:0;">Abra la app del proveedor y marque cada producto al agregarlo. El pedido se confirma allá.</p><div class="card narrow">' +
+      body = '<p class="hint" style="margin:0;">Abra ' + esc(cfg.app || 'la app o el sitio del proveedor') + ' y marque cada producto al agregarlo. El pedido se confirma allá.</p><div class="card narrow">' +
         items.map((it, i) => '<label class="check-row" for="ck' + i + '"><input type="checkbox" id="ck' + i + '"><span>' + esc(it.name) + '</span><b>' + esc(qtyText(it)) + '</b></label>').join('') + '</div>';
       bar = '<button type="button" class="btn" data-act="copylist">Copiar lista</button><div class="hint">' + items.length + ' productos.</div>';
     }
     return '<button type="button" class="btn ghost back" data-act="back">‹ Volver a revisar</button>' +
-      '<div><div class="hint">' + esc(cfg.name) + ' · ' + items.length + ' productos · inventario del ' + esc(dateLabel(S.sheets[S.sup].grid, S.col)) + '</div><h2 class="view-title">Confirme y envíe</h2></div>' +
+      '<div><div class="hint">' + esc(cfg.name) + ' · ' + items.length + ' productos' + (S.sheets[S.sup] ? ' · inventario del ' + esc(dateLabel(S.sheets[S.sup].grid, S.col)) : '') + '</div><h2 class="view-title">Confirme y envíe</h2></div>' +
       errBox() + seg + body + '<div class="sticky-bar narrow">' + bar + '</div>';
   }
   function render() {
@@ -730,7 +760,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
         tabBtn('ajustes', 'Ajustes', '<path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h8M16 18h4"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="14" cy="18" r="2"/>') + '</nav>');
     if (S.notice) { toast(S.notice); S.notice = ''; }
   }
-  function go(view) { S.view = view; S.error = ''; S.confirmReset = false; render(); window.scrollTo(0, 0); }
+  function go(view) { S.view = view; S.error = ''; S.confirmReset = false; S.confirmDel = null; render(); window.scrollTo(0, 0); }
 
   /* ---------- eventos ---------- */
   function copy(text, okMsg) {
@@ -755,7 +785,34 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
       const qty = parseFloat(document.getElementById('addqty').value) || 1;
       if (!name) { S.error = 'Escriba el nombre del producto.'; return render(); }
       S.items.push({ key: 'MANUAL:' + Core.key(name), sheetName: '', name, qty, unit: document.getElementById('addunit').value.trim(), note: '', flags: [], include: true, raw: '', usual: false });
+      if (!S.sheets[S.sup]) {
+        const c = supCfg(S.sup);
+        if (!c.usuals.some(u => Core.key(u.name) === Core.key(name))) { c.usuals.push({ name, qty, unit: document.getElementById('addunit').value.trim() }); save(); S.notice = 'Guardado en la lista de usuales.'; }
+      }
       S.error = ''; return render();
+    }
+    if (a === 'addsup') {
+      const name = document.getElementById('newname').value.trim().replace(/\s+/g, ' ');
+      if (!name) { S.error = 'Escriba el nombre del proveedor.'; return render(); }
+      const k = supKey(name);
+      if (S.cfg[k]) { S.error = 'Ya existe un proveedor con ese nombre.'; return render(); }
+      const c = supCfg(k, name);
+      c.name = name; c.channel = document.getElementById('newch').value; c.app = document.getElementById('newapp').value.trim();
+      save(); S.error = ''; S.notice = name + ' agregado.'; return render();
+    }
+    if (a === 'addusual') {
+      const id = b.dataset.id, c = supCfg(b.dataset.k);
+      const name = document.getElementById('un_' + id).value.trim();
+      if (!name) { S.error = 'Escriba el nombre del producto usual.'; return render(); }
+      if (c.usuals.some(u => Core.key(u.name) === Core.key(name))) { S.error = 'Ese producto ya está en los usuales de ' + c.name + '.'; return render(); }
+      c.usuals.push({ name, qty: parseFloat(document.getElementById('uq_' + id).value) || 1, unit: document.getElementById('uu_' + id).value.trim() });
+      save(); S.error = ''; return render();
+    }
+    if (a === 'delusual') { supCfg(b.dataset.k).usuals.splice(+b.dataset.j, 1); save(); return render(); }
+    if (a === 'delsup') {
+      const k = b.dataset.k;
+      if (S.confirmDel !== k) { S.confirmDel = k; return render(); }
+      const name = S.cfg[k].name; delete S.cfg[k]; delete S.sheets[k]; S.confirmDel = null; save(); S.notice = name + ' eliminado.'; return render();
     }
     if (a === 'tosend') { toSend(); S.error = ''; render(); window.scrollTo(0, 0); return; }
     if (a === 'back') return go('review');
