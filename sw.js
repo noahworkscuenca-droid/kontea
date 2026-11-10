@@ -1,7 +1,7 @@
-// Kontea — service worker mínimo: solo cachea el shell de la app (mismo origen)
-// para que sea instalable y abra rápido; nunca intercepta llamadas a Supabase
+// Kontea Pedidos — service worker mínimo: solo cachea el shell de la app (mismo origen)
+// para que sea instalable y abra rápido; nunca intercepta llamadas a Supabase ni a Google Sheets
 // (cross-origin), que siempre deben ir a la red para tener datos reales.
-const CACHE_NAME = 'kontea-shell-v2026-09-15';
+const CACHE_NAME = 'kontea-pedidos-shell-v2026-11-10';
 const SHELL_URLS = ['/', '/index.html', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {
