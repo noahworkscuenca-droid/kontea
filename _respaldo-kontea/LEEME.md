@@ -11,6 +11,7 @@ Para restaurarla:
 
     git mv _respaldo-kontea/index.html index.html
     cp _respaldo-kontea/manifest.json _respaldo-kontea/sw.js .
+    cp _respaldo-kontea/iconos/* .
 
 y suba un número nuevo en `CACHE_NAME` dentro de `sw.js` para que los teléfonos
 descarguen la versión restaurada.
