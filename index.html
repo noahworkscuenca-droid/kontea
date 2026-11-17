@@ -324,7 +324,7 @@ const Core = (() => {
       }
       items.push({
         key: k, sheetName: p.name, name: (cat && cat.name) || aliases[k] || sentence(p.name),
-        qty: c.qty, unit: c.unit, note: c.note, flags, include: !c.doubt, raw: c.raw, usual: false
+        qty: c.qty, unit: c.unit, note: c.note, flags, include: !c.doubt, raw: c.raw, usual: false, url: (cat && cat.url) || ''
       });
     }
     for (const u of (cfg.usuals || [])) {
@@ -391,7 +391,9 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
     try { const saved = localStorage.getItem('kontea_theme'); if(saved) document.documentElement.setAttribute('data-theme', saved); } catch (e) {}
   }
   applyTheme();
-  const BASE = { channel: 'whatsapp', phone: '', greeting: 'Hola! Tengo pedido', closing: 'Gracias', app: '', aliases: {}, catalog: {}, usuals: [] };
+  const BASE = { channel: 'whatsapp', phone: '', greeting: 'Hola! Tengo pedido', closing: 'Gracias', app: '', buscar: '', aliases: {}, catalog: {}, usuals: [] };
+  // Búsqueda en la tienda: {q} se reemplaza por el nombre del producto. Se puede cambiar en Ajustes.
+  const BUSCAR = { PRICESMART: 'https://www.pricesmart.com/es-cr/busqueda?q={q}' };
   const DEFAULTS = {
     ISLENA: Object.assign({}, BASE, { name: 'Isleña', aliases: {
       'PASTA DE TOMATE CIRIO': 'Pasta de tomate', 'ACEITE DE OLIVA ORUJO': 'Aceite de oliva', 'ACEITE AJONJOLI': 'Aceite de ajonjolí',
@@ -458,6 +460,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
     const c = S.cfg[k], d = DEFAULTS[k] || BASE;
     for (const f of Object.keys(BASE)) if (c[f] == null) c[f] = clone(d[f] != null ? d[f] : BASE[f]);
     if (!c.name) c.name = name || k;
+    if (!c.buscar && BUSCAR[k]) c.buscar = BUSCAR[k];
     return c;
   }
   function save() {
@@ -483,6 +486,14 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
   function useSource(src) { S.src = src === 'hoja' ? 'hoja' : 'despensy'; S.sheets = S.src === 'hoja' ? S.hoja : S.dsp; }
 
   /* ---------- Despensy ---------- */
+  // Guarda el nombre del producto en la tienda para todo el restaurante (lo usan Pedidos y la extensión).
+  async function saveTienda(pid, supplierId, nombre) {
+    try {
+      const up = await sb.from('pedidos_catalogo').update({ nombre_tienda: nombre, updated_at: new Date().toISOString() }).eq('despensy_producto_id', pid).select('id');
+      if (!up.error && up.data && up.data.length) return;
+      await sb.from('pedidos_catalogo').insert({ despensy_producto_id: pid, supplier_id: supplierId || null, nombre_tienda: nombre });
+    } catch (e) { /* queda guardado en este dispositivo */ }
+  }
   const DSP_DATES = 8;
   const fechaCorta = f => { const m = String(f || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? +m[3] + '/' + +m[2] + '/' + m[1].slice(2) : String(f || ''); };
   const diasDesde = f => Math.floor((Date.now() - new Date(String(f) + 'T12:00:00').getTime()) / 864e5);
@@ -520,11 +531,13 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
     if (!sb) return;
     S.busy = true; S.dspErr = ''; if (!quiet) { S.notice = 'Leyendo Despensy…'; } render();
     try {
-      const [provs, conteos, prods] = await Promise.all([
+      const [provs, conteos, prods, cats] = await Promise.all([
         selectAll(() => sb.from('despensy_proveedores').select('id,nombre,activo,supplier_id').order('id')),
         selectAll(() => sb.from('despensy_conteos').select('id,proveedor_id,fecha,estado').order('fecha', { ascending: true }).order('id')),
-        selectAll(() => sb.from('despensy_productos').select('id,nombre,categoria,unidad_compra,orden').order('id'))
+        selectAll(() => sb.from('despensy_productos').select('id,proveedor_id,nombre,categoria,unidad_compra,orden').order('id')),
+        selectAll(() => sb.from('pedidos_catalogo').select('despensy_producto_id,nombre_tienda,codigo_tienda,url,notas').order('id')).catch(() => [])
       ]);
+      const tienda = {}; cats.forEach(x => { tienda[x.despensy_producto_id] = x; });
       const supIds = provs.map(p => p.supplier_id).filter(Boolean);
       let sups = [];
       if (supIds.length) {
@@ -551,7 +564,16 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
             if (!c.app) c.app = sup.portal_name || (sup.portal_url ? sup.portal_url.replace(/^https?:\/\/(www\.)?/, '').replace(/\/.*$/, '') : (sup.order_channel === 'presencial' ? (sup.name || pv.nombre) : ''));
           }
         }
-        const grid = { supplier: pv.nombre, src: 'despensy', provId: pv.id, products: [], byId: {}, info, loaded: {}, pending,
+        // Catálogo compartido (Supabase): nombre y enlace del producto en la tienda del proveedor
+        const keyToPid = {};
+        prods.forEach(x => {
+          if (x.proveedor_id !== pv.id) return;
+          keyToPid[Core.key(x.nombre)] = x.id;
+          const t = tienda[x.id]; if (!t || !(t.nombre_tienda || t.url)) return;
+          const kk = Core.key(x.nombre), prev = c.catalog[kk] || {};
+          c.catalog[kk] = { name: t.nombre_tienda || prev.name || Core.sentence(x.nombre), note: t.notas || prev.note || '', url: t.url || '', code: t.codigo_tienda || '' };
+        });
+        const grid = { supplier: pv.nombre, src: 'despensy', provId: pv.id, supplierId: pv.supplier_id, keyToPid, products: [], byId: {}, info, loaded: {}, pending,
           dates: ok.map((x, i) => ({ col: i, id: x.id, fecha: x.fecha, label: fechaCorta(x.fecha) })), latestCol: ok.length - 1 };
         dsp[k] = { grid, loadedAt: Date.now(), example: false, pending, fecha: ok.length ? ok[ok.length - 1].fecha : null };
         if (ok.length) latest.push([grid, ok.length - 1]);
@@ -742,6 +764,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
         '<option value="whatsapp"' + (c.channel === 'whatsapp' ? ' selected' : '') + '>Mensaje de WhatsApp</option>' +
         '<option value="lista"' + (c.channel === 'lista' ? ' selected' : '') + '>Lista para marcar en la app o sitio del proveedor</option></select></div>' +
         '<div class="field"><label for="ap_' + id + '">App o sitio donde se pide (ej. Choco, PriceSmart)</label><input type="text" id="ap_' + id + '" data-cfg="app" data-k="' + esc(k) + '" value="' + esc(c.app) + '" autocomplete="off"></div>' +
+        '<div class="field"><label for="bu_' + id + '">Enlace de búsqueda de la tienda ({q} = producto)</label><input type="url" id="bu_' + id + '" data-cfg="buscar" data-k="' + esc(k) + '" value="' + esc(c.buscar) + '" autocomplete="off" placeholder="https://…?q={q}"></div>' +
         '<div class="section-title" style="margin:6px 0 6px;">Productos usuales</div>' +
         '<p class="hint" style="margin:0 0 8px;">Aparecen sin marcar en cada pedido' + (hasData(k) ? ', además de lo que diga el inventario.' : '. Este proveedor no tiene hoja: el pedido sale de esta lista.') + '</p>' +
         (c.usuals.length ? c.usuals.map((u, j) => '<div class="order-row"><span>' + esc(u.name) + '</span><span class="oq">' + esc(qtyText(u)) + '</span>' +
@@ -810,7 +833,11 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
         '<div class="hint">' + (digits ? 'Se abre el chat del +' + esc(digits) + ' con el texto listo. Usted toca enviar.' : 'No hay número guardado para ' + esc(cfg.name) + ': WhatsApp le pedirá elegir el contacto. Guárdelo en Ajustes.') + '</div>';
     } else {
       body = '<p class="hint" style="margin:0;">Abra ' + esc(cfg.app || 'la app o el sitio del proveedor') + ' y marque cada producto al agregarlo. El pedido se confirma allá.</p><div class="list">' +
-        items.map((it, i) => '<label class="check-row" for="ck' + i + '"><input type="checkbox" id="ck' + i + '"><span>' + esc(it.name) + '</span><b>' + esc(qtyText(it)) + '</b></label>').join('') + '</div>';
+        items.map((it, i) => {
+          const href = it.url || (cfg.buscar ? cfg.buscar.replace('{q}', encodeURIComponent(it.name)) : '');
+          return '<div class="check-row"><input type="checkbox" id="ck' + i + '" aria-label="Agregado: ' + esc(it.name) + '"><label for="ck' + i + '" style="flex:1;min-width:0">' + esc(it.name) + '</label><b>' + esc(qtyText(it)) + '</b>' +
+            (href ? '<a class="btn ghost sm" href="' + esc(href) + '" target="_blank" rel="noopener" aria-label="' + (it.url ? 'Abrir ' : 'Buscar ') + esc(it.name) + ' en ' + esc(cfg.app || cfg.name) + '">' + (it.url ? 'Abrir' : 'Buscar') + '</a>' : '') + '</div>';
+        }).join('') + '</div>';
       bar = '<button type="button" class="btn" data-act="copylist">Copiar lista</button><div class="hint">' + items.length + ' productos.</div>';
     }
     const head = topWhite('back', 'Volver a revisar', (S.mode === 'whatsapp' ? 'Mensaje para ' : 'Lista para ') + cfg.name,
@@ -939,7 +966,11 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
         it.name = v;
         if (it.sheetName) {
           const cfg = supCfg(S.sup);
-          if (cfg.channel === 'lista') { cfg.catalog[it.key] = Object.assign({}, cfg.catalog[it.key], { name: v }); it.flags = it.flags.filter(f => !/^Sin enlazar/.test(f)); }
+          if (cfg.channel === 'lista') {
+            cfg.catalog[it.key] = Object.assign({}, cfg.catalog[it.key], { name: v }); it.flags = it.flags.filter(f => !/^Sin enlazar/.test(f));
+            const g = S.sheets[S.sup] && S.sheets[S.sup].grid, pid = g && g.keyToPid && g.keyToPid[it.key];
+            if (pid) saveTienda(pid, g.supplierId, v);
+          }
           else cfg.aliases[it.key] = v;
           save(); S.notice = 'Nombre guardado para los próximos pedidos.'; render();
         }
